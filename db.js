@@ -40,6 +40,32 @@ async function init() {
     );
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_id, created_at);`);
+
+  // ---------- Business Messaging API ----------
+  // A business account has its own row here AND a linked row in `users` (via
+  // sender_user_id) so its messages flow through the exact same message/room/
+  // socket pipeline as a normal person — no parallel delivery system needed.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS business_accounts (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      sender_user_id TEXT NOT NULL REFERENCES users(id),
+      api_key_hash TEXT NOT NULL,
+      stripe_customer_id TEXT,
+      plan TEXT NOT NULL DEFAULT 'pay_as_you_go',
+      created_at BIGINT NOT NULL
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS api_usage (
+      id TEXT PRIMARY KEY,
+      business_id TEXT NOT NULL REFERENCES business_accounts(id),
+      message_id TEXT,
+      created_at BIGINT NOT NULL
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_api_usage_business ON api_usage (business_id, created_at);`);
+
   console.log('Database ready');
 }
 
