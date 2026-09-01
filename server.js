@@ -28,7 +28,10 @@ if (JWT_SECRET === 'change-this-secret-before-deploying') {
 // real client IP instead of the proxy's, which the rate limiters below need.
 app.set('trust proxy', 1);
 
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: false // the frontend uses inline onclick handlers; a default CSP blocks those
+}));
 app.use(cors());
 app.use(express.json({ limit: '1mb' })); // caps request body size against abuse
 
