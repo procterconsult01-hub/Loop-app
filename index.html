@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Loop</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- AUTH -->
+  <div class="view active" id="view-auth">
+    <div class="auth-box">
+      <div class="brand">Loop</div>
+      <div class="auth-tabs">
+        <div class="auth-tab active" id="tab-login" onclick="setAuthMode('login')">Log in</div>
+        <div class="auth-tab" id="tab-register" onclick="setAuthMode('register')">Sign up</div>
+      </div>
+
+      <div id="register-fields" style="display:none;">
+        <input class="field" id="reg-name" placeholder="Your name">
+      </div>
+      <input class="field" id="auth-phone" placeholder="Phone number">
+      <input class="field" id="auth-password" type="password" placeholder="Password">
+      <div class="error" id="auth-error"></div>
+      <button class="btn-primary" id="auth-submit" onclick="submitAuth()">Log in</button>
+    </div>
+  </div>
+
+  <!-- MAIN SHELL -->
+  <div class="view" id="view-main">
+    <div class="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">Loop</div>
+        <div class="me" id="me-label"></div>
+      </div>
+      <div class="sidebar-section-label">New group</div>
+      <div class="new-group-row">
+        <input class="field small" id="group-name" placeholder="Group name">
+        <button class="btn-small" onclick="createGroup()">Create</button>
+      </div>
+      <div id="group-member-picker" class="member-picker"></div>
+
+      <div class="sidebar-section-label">Groups</div>
+      <div id="group-list" class="list"></div>
+
+      <div class="sidebar-section-label">Contacts</div>
+      <div id="contact-list" class="list"></div>
+    </div>
+
+    <div class="chat-panel">
+      <div class="chat-empty" id="chat-empty">Pick a contact or group to start chatting.</div>
+
+      <div class="chat-active" id="chat-active" style="display:none;">
+        <div class="chat-header">
+          <div class="room-avatar" id="room-avatar"></div>
+          <div>
+            <div class="chat-header-name" id="room-name"></div>
+            <div class="chat-header-status" id="room-status"></div>
+          </div>
+          <div class="header-icons">
+            <span onclick="startCall('video')" title="Video call">🎥</span>
+            <span onclick="startCall('voice')" title="Voice call">📞</span>
+          </div>
+        </div>
+        <div class="messages" id="messages"></div>
+        <div class="input-bar">
+          <label class="input-icon" for="file-input">📎</label>
+          <input type="file" id="file-input" style="display:none;" onchange="handleFileSelect(event)">
+          <input class="text-input" id="text-input" placeholder="Message" onkeydown="if(event.key==='Enter')sendMessage()">
+          <button class="send-btn" onclick="sendMessage()">➤</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- INCOMING CALL -->
+  <div class="call-overlay" id="incoming-call-overlay">
+    <div class="call-card">
+      <div class="call-avatar-lg" id="incoming-avatar"></div>
+      <div class="call-name-lg" id="incoming-name"></div>
+      <div class="call-sub" id="incoming-type"></div>
+      <div class="call-actions">
+        <button class="call-btn reject" onclick="rejectCall()">Decline</button>
+        <button class="call-btn accept" onclick="acceptCall()">Accept</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ACTIVE CALL -->
+  <div class="call-overlay" id="active-call-overlay">
+    <div class="call-card wide">
+      <video id="remote-video" autoplay playsinline></video>
+      <video id="local-video" autoplay playsinline muted></video>
+      <div class="call-name-lg" id="active-call-name"></div>
+      <div class="call-sub" id="active-call-status">Connecting…</div>
+      <div class="call-actions">
+        <button class="call-ctrl" id="mute-btn" onclick="toggleMute()">🎙️</button>
+        <button class="call-ctrl" id="cam-btn" onclick="toggleCamera()">🎥</button>
+        <button class="call-ctrl end" onclick="endCall()">⏹</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
