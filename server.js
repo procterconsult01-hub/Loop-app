@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const crypto = require('crypto');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -12,6 +13,14 @@ const { v4: uuid } = require('uuid');
 const { Server } = require('socket.io');
 const { pool, init } = require('./db');
 const { saveFile, localUploadsDir } = require('./storage');
+
+let stripe = null;
+if (process.env.STRIPE_SECRET_KEY) {
+  stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+  console.log('Stripe billing: connected');
+} else {
+  console.log('Stripe billing: not configured — usage is tracked but not billed. See README.');
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -24,18 +33,15 @@ if (JWT_SECRET === 'change-this-secret-before-deploying') {
   console.warn('WARNING: JWT_SECRET is not set — using an insecure default. Set it in your environment before real use.');
 }
 
-// Railway (and most hosts) sit behind a proxy — this makes req.ip reflect the
-// real client IP instead of the proxy's, which the rate limiters below need.
 app.set('trust proxy', 1);
 
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
-  contentSecurityPolicy: false // the frontend uses inline onclick handlers; a default CSP blocks those
+  contentSecurityPolicy: false
 }));
 app.use(cors());
-app.use(express.json({ limit: '1mb' })); // caps request body size against abuse
+app.use(express.json({ limit: '1mb' }));
 
-// Slows down brute-force attempts against login/register specifically.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 20,
@@ -43,7 +49,6 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many attempts. Please wait a few minutes and try again.' }
 });
-// A gentler general limit across the rest of the API.
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: 120,
@@ -52,12 +57,17 @@ const apiLimiter = rateLimit({
 });
 app.use('/api/', apiLimiter);
 
-app.use('/uploads', express.static(localUploadsDir)); // only used when R2 isn't configured
-app.use(express.static(__dirname)); // flat repo — frontend files sit alongside server.js
+const businessApiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 300,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+app.use('/api/v1/', businessApiLimiter);
 
-// ---------- File uploads (media) ----------
-// Kept in memory, then handed to storage.js which sends to R2 if configured
-// or writes to local disk otherwise.
+app.use('/uploads', express.static(localUploadsDir));
+app.use(express.static(__dirname));
+
 const ALLOWED_MIME_TYPES = [
   'image/jpeg', 'image/png', 'image/gif', 'image/webp',
   'video/mp4', 'video/webm', 'video/quicktime',
@@ -66,14 +76,13 @@ const ALLOWED_MIME_TYPES = [
 ];
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB cap
+  limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (ALLOWED_MIME_TYPES.includes(file.mimetype)) cb(null, true);
     else cb(new Error('That file type is not allowed'));
   }
 });
 
-// ---------- Auth helpers ----------
 function signToken(user) {
   return jwt.sign({ id: user.id, name: user.name }, JWT_SECRET, { expiresIn: '30d' });
 }
@@ -92,7 +101,26 @@ function roomIdForDM(userIdA, userIdB) {
   return 'dm:' + [userIdA, userIdB].sort().join(':');
 }
 
-// ---------- Auth routes ----------
+function generateApiKey() {
+  return 'loop_live_' + crypto.randomBytes(24).toString('hex');
+}
+function hashApiKey(key) {
+  return crypto.createHash('sha256').update(key).digest('hex');
+}
+async function apiKeyAuth(req, res, next) {
+  const key = req.headers['x-api-key'];
+  if (!key) return res.status(401).json({ error: 'Missing X-API-Key header' });
+  try {
+    const hash = hashApiKey(key);
+    const result = await pool.query('SELECT * FROM business_accounts WHERE api_key_hash = $1', [hash]);
+    if (!result.rows[0]) return res.status(401).json({ error: 'Invalid API key' });
+    req.business = result.rows[0];
+    next();
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Auth check failed' });
+  }
+}
 app.post('/api/register', authLimiter, async (req, res) => {
   try {
     const { name, phone, password } = req.body;
@@ -146,13 +174,11 @@ app.get('/api/me', authMiddleware, async (req, res) => {
   res.json(result.rows[0]);
 });
 
-// ---------- Directory / contacts ----------
 app.get('/api/contacts', authMiddleware, async (req, res) => {
   const result = await pool.query('SELECT id, name, phone FROM users WHERE id != $1 ORDER BY name', [req.user.id]);
   res.json(result.rows);
 });
 
-// ---------- Groups ----------
 app.post('/api/groups', authMiddleware, async (req, res) => {
   const { name, memberIds } = req.body;
   if (!name || typeof name !== 'string' || name.trim().length === 0 || name.length > 80) {
@@ -181,7 +207,6 @@ app.get('/api/groups', authMiddleware, async (req, res) => {
   res.json(groups);
 });
 
-// ---------- Media upload ----------
 app.post('/api/upload', authMiddleware, (req, res) => {
   upload.single('file')(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message || 'Upload failed' });
@@ -196,7 +221,6 @@ app.post('/api/upload', authMiddleware, (req, res) => {
   });
 });
 
-// ---------- Message history ----------
 app.get('/api/messages/:roomId', authMiddleware, async (req, res) => {
   const result = await pool.query(
     'SELECT * FROM messages WHERE room_id = $1 ORDER BY created_at ASC',
@@ -213,9 +237,6 @@ app.get('/api/rooms/dm/:otherUserId', authMiddleware, (req, res) => {
   res.json({ roomId: roomIdForDM(req.user.id, req.params.otherUserId) });
 });
 
-// ---------- ICE server config (STUN + TURN) for WebRTC calls ----------
-// Frontend fetches this instead of hardcoding servers, so TURN credentials
-// live only in environment variables, never in client-side code.
 app.get('/api/ice-servers', authMiddleware, (req, res) => {
   const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
   if (process.env.TURN_URL && process.env.TURN_USERNAME && process.env.TURN_CREDENTIAL) {
@@ -228,8 +249,110 @@ app.get('/api/ice-servers', authMiddleware, (req, res) => {
   res.json({ iceServers });
 });
 
-// ---------- Socket.io: auth + presence ----------
-const onlineUsers = new Map(); // userId -> socketId
+app.post('/api/business/register', authMiddleware, async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name || typeof name !== 'string' || name.trim().length === 0 || name.length > 80) {
+      return res.status(400).json({ error: 'Business name must be between 1 and 80 characters' });
+    }
+
+    const senderUserId = uuid();
+    const placeholderPhone = 'biz:' + senderUserId;
+    const unusablePasswordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
+    await pool.query(
+      'INSERT INTO users (id, name, phone, password_hash, created_at) VALUES ($1,$2,$3,$4,$5)',
+      [senderUserId, name.trim(), placeholderPhone, unusablePasswordHash, Date.now()]
+    );
+
+    const apiKey = generateApiKey();
+    const business = {
+      id: uuid(),
+      name: name.trim(),
+      senderUserId,
+      apiKeyHash: hashApiKey(apiKey),
+      createdAt: Date.now()
+    };
+    await pool.query(
+      'INSERT INTO business_accounts (id, name, sender_user_id, api_key_hash, plan, created_at) VALUES ($1,$2,$3,$4,$5,$6)',
+      [business.id, business.name, business.senderUserId, business.apiKeyHash, 'pay_as_you_go', business.createdAt]
+    );
+
+    res.json({
+      businessId: business.id,
+      name: business.name,
+      apiKey,
+      warning: 'Save this API key now — it will not be shown again.'
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Could not create business account' });
+  }
+});app.post('/api/v1/messages/send', apiKeyAuth, async (req, res) => {
+  try {
+    const { toPhone, text } = req.body;
+    if (!toPhone || !text) return res.status(400).json({ error: 'toPhone and text are required' });
+    if (typeof text !== 'string' || text.length > 2000) return res.status(400).json({ error: 'text must be under 2000 characters' });
+
+    const recipient = await pool.query('SELECT id FROM users WHERE phone = $1', [toPhone]);
+    if (!recipient.rows[0]) return res.status(404).json({ error: 'No registered user with that phone number' });
+
+    const roomId = roomIdForDM(req.business.sender_user_id, recipient.rows[0].id);
+    const message = {
+      id: uuid(),
+      roomId,
+      senderId: req.business.sender_user_id,
+      senderName: req.business.name,
+      text,
+      mediaUrl: null,
+      mediaType: null,
+      createdAt: Date.now()
+    };
+    await pool.query(
+      `INSERT INTO messages (id, room_id, sender_id, sender_name, text, media_url, media_type, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [message.id, message.roomId, message.senderId, message.senderName, message.text, message.mediaUrl, message.mediaType, message.createdAt]
+    );
+    io.to(roomId).emit('message:new', message);
+
+    await pool.query(
+      'INSERT INTO api_usage (id, business_id, message_id, created_at) VALUES ($1,$2,$3,$4)',
+      [uuid(), req.business.id, message.id, Date.now()]
+    );
+    if (stripe && req.business.stripe_customer_id) {
+      try {
+        await stripe.billing.meterEvents.create({
+          event_name: 'message_sent',
+          payload: { stripe_customer_id: req.business.stripe_customer_id, value: '1' }
+        });
+      } catch (stripeErr) {
+        console.error('Stripe usage report failed (message still sent):', stripeErr.message);
+      }
+    }
+
+    res.json({ messageId: message.id, status: 'sent' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+app.get('/api/v1/usage', apiKeyAuth, async (req, res) => {
+  const startOfMonth = new Date();
+  startOfMonth.setDate(1);
+  startOfMonth.setHours(0, 0, 0, 0);
+
+  const result = await pool.query(
+    'SELECT COUNT(*) FROM api_usage WHERE business_id = $1 AND created_at >= $2',
+    [req.business.id, startOfMonth.getTime()]
+  );
+  res.json({
+    businessId: req.business.id,
+    period: startOfMonth.toISOString().slice(0, 7),
+    messagesSent: parseInt(result.rows[0].count, 10)
+  });
+});
+
+const onlineUsers = new Map();
 
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token;
@@ -252,7 +375,7 @@ io.on('connection', (socket) => {
 
   socket.on('message:send', async ({ roomId, text, mediaUrl, mediaType }) => {
     if (!roomId || (!text && !mediaUrl)) return;
-    if (text && (typeof text !== 'string' || text.length > 2000)) return; // basic abuse guard
+    if (text && (typeof text !== 'string' || text.length > 2000)) return;
     const message = {
       id: uuid(), roomId, senderId: userId, senderName: socket.user.name,
       text: text || null, mediaUrl: mediaUrl || null, mediaType: mediaType || null,
@@ -274,7 +397,6 @@ io.on('connection', (socket) => {
     socket.to(roomId).emit('typing', { roomId, userId, name: socket.user.name, isTyping });
   });
 
-  // ---------- WebRTC signaling (voice/video calls) ----------
   socket.on('call:invite', ({ toUserId, roomId, callType }) => {
     const targetSocket = onlineUsers.get(toUserId);
     if (!targetSocket) { socket.emit('call:unavailable', { toUserId }); return; }
