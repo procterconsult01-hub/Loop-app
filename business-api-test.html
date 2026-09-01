@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Loop Business API — Test Console</title>
+<style>
+  :root{ --bg:#0F1115; --surface:#1A1D25; --border:#2A2E3A; --text:#F2F3F7; --text-dim:#9096AA; --accent:#6C5CE7; --ok:#34D399; --err:#FF5A6E; }
+  *{box-sizing:border-box;}
+  body{ font-family:-apple-system,sans-serif; background:var(--bg); color:var(--text); margin:0; padding:20px; }
+  .card{ background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:18px; margin-bottom:16px; }
+  h2{ margin:0 0 12px; font-size:16px; }
+  h1{ font-size:22px; margin-bottom:4px; }
+  .sub{ color:var(--text-dim); font-size:13px; margin-bottom:20px; }
+  input{ width:100%; background:#20242F; border:1px solid var(--border); border-radius:10px; padding:10px 12px; color:var(--text); font-size:14px; margin-bottom:8px; }
+  button{ width:100%; background:var(--accent); color:#fff; border:none; border-radius:10px; padding:12px; font-weight:600; font-size:14px; cursor:pointer; }
+  button:disabled{ opacity:.5; }
+  .result{ margin-top:10px; padding:10px; border-radius:8px; font-size:12.5px; white-space:pre-wrap; word-break:break-all; font-family:monospace; }
+  .result.ok{ background:rgba(52,211,153,.1); border:1px solid var(--ok); color:var(--ok); }
+  .result.err{ background:rgba(255,90,110,.1); border:1px solid var(--err); color:var(--err); }
+  .step-label{ font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--text-dim); margin-bottom:6px; }
+  .status{ font-size:12.5px; color:var(--text-dim); margin-top:6px; }
+</style>
+</head>
+<body>
+
+<h1>Loop Business API</h1>
+<div class="sub">Test console — walks through login, business registration, and sending a message.</div>
+
+<div class="card">
+  <div class="step-label">Step 1</div>
+  <h2>Log in with your Loop account</h2>
+  <input id="phone" placeholder="Phone number (e.g. your Austine login)">
+  <input id="password" type="password" placeholder="Password">
+  <button onclick="doLogin()">Log in</button>
+  <div id="login-result"></div>
+</div>
+
+<div class="card">
+  <div class="step-label">Step 2</div>
+  <h2>Create a business account</h2>
+  <input id="biz-name" placeholder="Business name (e.g. Test Business)">
+  <button id="register-btn" onclick="registerBusiness()" disabled>Register business</button>
+  <div class="status" id="register-status">Log in first (Step 1)</div>
+  <div id="register-result"></div>
+</div>
+
+<div class="card">
+  <div class="step-label">Step 3</div>
+  <h2>Send a test message</h2>
+  <input id="send-to-phone" placeholder="Recipient phone number (a registered Loop user)">
+  <input id="send-text" placeholder="Message text">
+  <button id="send-btn" onclick="sendMessage()" disabled>Send message</button>
+  <div class="status" id="send-status">Register a business first (Step 2)</div>
+  <div id="send-result"></div>
+</div>
+
+<div class="card">
+  <div class="step-label">Bonus</div>
+  <h2>Check usage this month</h2>
+  <button id="usage-btn" onclick="checkUsage()" disabled>Check usage</button>
+  <div id="usage-result"></div>
+</div>
+
+<script>
+const API = ''; // same origin as this page — no CORS issues
+let jwtToken = null;
+let apiKey = null;
+
+function showResult(elId, ok, data){
+  const el = document.getElementById(elId);
+  el.className = 'result ' + (ok ? 'ok' : 'err');
+  el.textContent = JSON.stringify(data, null, 2);
+}
+
+async function doLogin(){
+  const phone = document.getElementById('phone').value.trim();
+  const password = document.getElementById('password').value;
+  try{
+    const res = await fetch(API + '/api/login', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ phone, password })
+    });
+    const data = await res.json();
+    showResult('login-result', res.ok, data);
+    if(res.ok){
+      jwtToken = data.token;
+      document.getElementById('register-btn').disabled = false;
+      document.getElementById('register-status').textContent = 'Logged in as ' + data.user.name + ' — ready.';
+    }
+  }catch(e){
+    showResult('login-result', false, { error: 'Network error: ' + e.message });
+  }
+}
+
+async function registerBusiness(){
+  const name = document.getElementById('biz-name').value.trim();
+  if(!name){ alert('Enter a business name'); return; }
+  try{
+    const res = await fetch(API + '/api/business/register', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', 'Authorization': 'Bearer ' + jwtToken},
+      body: JSON.stringify({ name })
+    });
+    const data = await res.json();
+    showResult('register-result', res.ok, data);
+    if(res.ok){
+      apiKey = data.apiKey;
+      document.getElementById('send-btn').disabled = false;
+      document.getElementById('usage-btn').disabled = false;
+      document.getElementById('send-status').textContent = 'Business "' + data.name + '" ready — API key saved in this page.';
+    }
+  }catch(e){
+    showResult('register-result', false, { error: 'Network error: ' + e.message });
+  }
+}
+
+async function sendMessage(){
+  const toPhone = document.getElementById('send-to-phone').value.trim();
+  const text = document.getElementById('send-text').value.trim();
+  if(!toPhone || !text){ alert('Fill in both fields'); return; }
+  try{
+    const res = await fetch(API + '/api/v1/messages/send', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', 'X-API-Key': apiKey},
+      body: JSON.stringify({ toPhone, text })
+    });
+    const data = await res.json();
+    showResult('send-result', res.ok, data);
+  }catch(e){
+    showResult('send-result', false, { error: 'Network error: ' + e.message });
+  }
+}
+
+async function checkUsage(){
+  try{
+    const res = await fetch(API + '/api/v1/usage', {
+      headers: {'X-API-Key': apiKey}
+    });
+    const data = await res.json();
+    showResult('usage-result', res.ok, data);
+  }catch(e){
+    showResult('usage-result', false, { error: 'Network error: ' + e.message });
+  }
+}
+</script>
+</body>
+</html>
